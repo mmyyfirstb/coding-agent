@@ -38,3 +38,6 @@ yarn-error.log*
 # Misc
 *.tmp
 *.bak
+
+# 本地配置（含密钥），不提交
+config.json
