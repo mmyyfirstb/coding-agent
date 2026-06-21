@@ -19,12 +19,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 
 	"zsh-agent/agent"
 	"zsh-agent/config"
@@ -40,7 +37,7 @@ const defaultSystemPrompt = `你是一个帮用户操作本地 zsh 的助手。
 文字回复保持简短，主要工作通过调用工具完成。`
 
 func main() {
-	// 1. 读配置：默认读项目根目录的 config.json，可用环境变量 AGENT_CONFIG 覆盖路径。
+	// 1. 读配置。
 	path := os.Getenv("AGENT_CONFIG")
 	if path == "" {
 		path = "config.json"
@@ -52,18 +49,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 2. 共享一个 stdin 读取器。
-	//    关键：终端 UI 在确认工具时也要读 stdin，若 main 与 UI 各自 new 一个
-	//    bufio.Reader，两个缓冲区会互相"偷"对方还没读的输入。
-	//    这里只建一个 *bufio.Reader 传给 UI——bufio.NewReader 收到已经是
-	//    *bufio.Reader 的入参时会原样返回，于是全程共用同一个缓冲区，不会打架。
-	stdin := bufio.NewReader(os.Stdin)
+	// 2. 尝试进 raw 模式：成功则启用 rune/宽度行编辑 + ESC 打断；失败（非 tty /
+	//    无 stty）则降级为普通行模式。defer 还原，保证退出时终端干净。
+	restore, raw := agent.EnableRaw()
+	defer restore()
 
 	// 3. 按配置组装各层。
 	provider := llm.NewOpenAIProvider(cfg.BaseURL, cfg.APIKey, cfg.Model, cfg.MaxTokens, cfg.Stream, cfg.InsecureSkipVerify)
 	reg := tools.NewRegistry()
 	reg.Register(tools.Bash{}) // 想加工具？实现 tools.Tool 后在这里再 Register 一行即可。
-	ui := agent.NewTerminalUI(stdin, os.Stdout)
+
+	var ui agent.UI
+	if raw {
+		ui = agent.NewRawTerminalUI(os.Stdin, os.Stdout)
+	} else {
+		ui = agent.NewTerminalUI(os.Stdin, os.Stdout)
+	}
 	ag := agent.New(provider, reg, ui)
 
 	// 4. 初始对话历史：开头放一条 system 消息。
@@ -73,30 +74,35 @@ func main() {
 	}
 	history := []llm.Message{{Role: llm.RoleSystem, Content: system}}
 
-	// 5. REPL：读一行用户输入 → 跑一个 agent 回合 → 循环，Ctrl+D 退出。
+	// 5. REPL：读一行 → 跑一个回合 → 循环。
 	fmt.Printf("zsh-agent 已就绪（后端 %s，模型 %s）。输入需求后回车，Ctrl+D 退出。\n", cfg.BaseURL, cfg.Model)
+	if raw {
+		fmt.Println("（生成中可按 ESC 或 Ctrl-C 打断）")
+	}
 	for {
-		// 青色「你 ›」标签：和模型回复的绿色「助手」标签对应，
-		// 让回看屏幕时一眼能分清哪行是自己输入的。你打的字保持默认色。
-		fmt.Print("\n\033[36m你 ›\033[0m ")
-		line, err := stdin.ReadString('\n')
-		if err == io.EOF {
+		line, oc := ui.ReadLine("\033[36m你 ›\033[0m ")
+		if oc == agent.OutcomeEOF {
 			fmt.Println()
 			return
 		}
-		line = strings.TrimSpace(line)
+		if oc == agent.OutcomeInterrupt {
+			continue // 放弃本行，重新给提示符
+		}
 		if line == "" {
 			continue
 		}
 
-		// 把用户输入作为一条 user 消息加进历史。
 		history = append(history, llm.Message{Role: llm.RoleUser, Content: line})
 
 		updated, err := ag.Run(context.Background(), history)
+		if err == context.Canceled {
+			fmt.Println("（已打断）")
+			history = history[:len(history)-1] // 丢掉这条 user，回到干净状态
+			continue
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "调用出错:", err)
-			// 出错时丢掉刚才那条 user 消息，让用户能干净重试。
-			history = history[:len(history)-1]
+			history = history[:len(history)-1] // 出错时丢掉刚才那条 user，便于干净重试
 			continue
 		}
 		history = updated
