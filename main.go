@@ -99,7 +99,10 @@ func main() {
 		updated, err := ag.Run(context.Background(), history)
 		if err == context.Canceled {
 			fmt.Println("（已打断）")
-			history = history[:len(history)-1] // 丢掉这条 user，回到干净状态
+			// 保留你这条输入，并补一条 assistant 占位标记「本回合被打断」：
+			// 这样下回合模型仍记得你问过什么，且保持 user/assistant 交替合法。
+			// updated 是 Run 回滚后的历史——含本回合 user、不含半截回复（见 Agent.Run）。
+			history = append(updated, llm.Message{Role: llm.RoleAssistant, Content: "（上一条回复被你打断了）"})
 			continue
 		}
 		if err != nil {
