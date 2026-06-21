@@ -36,3 +36,15 @@ type OutputSink interface {
 	llm.StreamSink
 	Close()
 }
+
+// Outcome 说明 UI.ReadLine 为何结束。它是交互契约的一部分（核心循环 / main 据此
+// 决定退出、重来还是正常处理），故与 UI 接口同住 agent 包；具体的终端实现在
+// zsh-agent/agent/terminal 里产出这些值。
+type Outcome int
+
+const (
+	OutcomeSubmit    Outcome = iota // 回车提交，line 有效
+	OutcomeEOF                      // 空行 Ctrl-D 或输入流关闭：请求退出
+	OutcomeInterrupt                // Ctrl-C：放弃本行，重来
+	OutcomeCancel                   // ESC 取消，仅在 escCancels 模式，如工具确认处
+)

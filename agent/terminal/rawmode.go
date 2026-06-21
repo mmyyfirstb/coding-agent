@@ -1,4 +1,4 @@
-package agent
+package terminal
 
 // rawmode.go：唯一直接操作终端模式的「脏」层。用 stty（零依赖）把控制终端切到
 // raw（cbreak）模式，并提供还原。非 tty / 无 stty 时返回 enabled=false，调用方降级。

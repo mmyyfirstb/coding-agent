@@ -1,4 +1,4 @@
-package agent
+package terminal
 
 import (
 	"errors"

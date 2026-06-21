@@ -1,14 +1,21 @@
-package agent
+package terminal
 
-// TerminalUI 的渲染测试：验证 sink（思考 / 正文）、工具确认、命令输出
-// 各自带上约定的标签与颜色转义，这是「回看屏幕能分清谁说的话」的基础。
+// TerminalUI 的行为测试，分两部分：
+//   - 非 raw（行模式）的渲染：sink（思考 / 正文）、工具确认、命令输出各自带上约定的
+//     标签与颜色转义，这是「回看屏幕能分清谁说的话」的基础；
+//   - raw 模式特有行为：rune/宽度感知行编辑（中文退格）与 ESC 打断。
 //
-// 用注入的 bytes.Buffer 作 out、strings.Reader 作 in，不碰真实终端。
+// 全程用注入的 bytes.Buffer / bytes.Reader 作 in/out，不碰真实终端。
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"zsh-agent/agent"
 )
 
 // 先思考后正文：暗灰「思考」块 + 换行收尾，再接绿色「助手」正文。
@@ -106,5 +113,30 @@ func TestTerminalUI_ConfirmTool_No(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "  （已拒绝）") {
 		t.Fatalf("拒绝提示缺少缩进：%q", out.String())
+	}
+}
+
+// raw 模式下中文应能被退格正确删除（核心 bug 修复的验证）。
+func TestRawTerminalUI_ReadLineChineseBackspace(t *testing.T) {
+	// 「中文」+ 退格(0x7f) + 回车 → "中"
+	in := bytes.NewReader([]byte("中文\x7f\r"))
+	ui := NewRawTerminalUI(in, io.Discard)
+	line, oc := ui.ReadLine("> ")
+	if line != "中" || oc != agent.OutcomeSubmit {
+		t.Fatalf("得到 (%q,%d)，期望 (\"中\",Submit)", line, oc)
+	}
+}
+
+// ESC 应触发 WatchInterrupt 的 cancel。
+func TestRawTerminalUI_WatchInterrupt(t *testing.T) {
+	in := bytes.NewReader([]byte{0x1b}) // ESC，随后流结束
+	ui := NewRawTerminalUI(in, io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := ui.WatchInterrupt(cancel)
+	defer stop()
+	select {
+	case <-ctx.Done(): // 期望被打断
+	case <-time.After(2 * time.Second):
+		t.Fatal("ESC 未触发 cancel")
 	}
 }

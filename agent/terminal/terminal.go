@@ -1,4 +1,7 @@
-package agent
+// Package terminal 是 agent.UI 的终端实现：raw / 行两种模式，提供 rune / 宽度
+// 感知的行编辑与 ESC/Ctrl-C 打断。把所有 tty 底层细节（stty、转义序列解码、
+// 显示列宽）收拢在这里，让 agent 包的核心循环只面对 agent.UI 接口。
+package terminal
 
 import (
 	"bufio"
@@ -6,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"zsh-agent/agent"
 )
 
 type TerminalUI struct {
@@ -30,7 +35,7 @@ func NewRawTerminalUI(in io.Reader, out io.Writer) *TerminalUI {
 }
 
 // Sink 返回一个新的 terminalSink，负责把本回合模型输出的思考 / 正文实时打到终端。
-func (t *TerminalUI) Sink() OutputSink {
+func (t *TerminalUI) Sink() agent.OutputSink {
 	return &terminalSink{out: t.out}
 }
 
@@ -92,7 +97,7 @@ func (t *TerminalUI) ConfirmTool(name, preview string) bool {
 		// escCancels=true：ESC 直接返回 OutcomeCancel，在确认处表示拒绝。
 		// Ctrl-C → OutcomeInterrupt，Ctrl-D → OutcomeEOF，均视为拒绝。
 		l, oc := ReadLine(t.keys, t.out, prompt, true)
-		if oc != OutcomeSubmit {
+		if oc != agent.OutcomeSubmit {
 			fmt.Fprint(t.out, "  （已拒绝）\n")
 			return false
 		}
@@ -127,14 +132,14 @@ func (t *TerminalUI) ToolOutput(s string) {
 }
 
 // ReadLine 读取一行用户输入。raw 模式走 rune/宽度感知行编辑器；否则回退按行读。
-func (t *TerminalUI) ReadLine(prompt string) (string, Outcome) {
+func (t *TerminalUI) ReadLine(prompt string) (string, agent.Outcome) {
 	if !t.raw {
 		fmt.Fprint(t.out, "\n"+prompt)
 		line, err := t.in.ReadString('\n')
 		if err == io.EOF {
-			return "", OutcomeEOF
+			return "", agent.OutcomeEOF
 		}
-		return strings.TrimSpace(line), OutcomeSubmit
+		return strings.TrimSpace(line), agent.OutcomeSubmit
 	}
 	fmt.Fprint(t.out, "\n") // 空行分隔，打一次（不进重绘，避免滚屏）
 	drainKeys(t.keys)       // 丢弃陈旧 type-ahead

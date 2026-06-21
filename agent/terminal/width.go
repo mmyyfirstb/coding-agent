@@ -1,4 +1,4 @@
-package agent
+package terminal
 
 // width.go：计算字符在终端里占的「显示列数」。
 // 行编辑器据此定位光标、重绘，正确处理中文等全角字符（占 2 列）。
