@@ -12,6 +12,7 @@ package llm
 // 翻译逻辑被拆成若干小的非导出函数，方便单测逐个验证。
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -30,6 +31,7 @@ type OpenAIProvider struct {
 	apiKey     string       // 鉴权用的 API Key（放进 Authorization: Bearer）
 	model      string       // 模型名，例如 gpt-4o / deepseek-chat
 	maxTokens  int          // 生成上限；为 0 时不下发该字段（让服务端用默认值）
+	stream     bool         // 是否用 SSE 流式接收（逐字显示）；false 则一次性整段返回
 	httpClient *http.Client // 复用连接的 HTTP 客户端（含 TLS 配置）
 }
 
@@ -38,7 +40,7 @@ type OpenAIProvider struct {
 // insecureOverride 用于显式控制是否跳过 TLS 证书校验：
 //   - 传 nil  → 自动判断（见 shouldSkipVerify：纯 IP 端点跳过，域名正常校验）；
 //   - 传 &true / &false → 强制覆盖自动判断。
-func NewOpenAIProvider(baseURL, apiKey, model string, maxTokens int, insecureOverride *bool) *OpenAIProvider {
+func NewOpenAIProvider(baseURL, apiKey, model string, maxTokens int, stream bool, insecureOverride *bool) *OpenAIProvider {
 	// 根据 baseURL 与覆盖项决定是否跳过证书校验。
 	skip := shouldSkipVerify(baseURL, insecureOverride)
 
@@ -52,6 +54,7 @@ func NewOpenAIProvider(baseURL, apiKey, model string, maxTokens int, insecureOve
 		apiKey:     apiKey,
 		model:      model,
 		maxTokens:  maxTokens,
+		stream:     stream,
 		httpClient: &http.Client{Transport: transport},
 	}
 }
@@ -97,6 +100,7 @@ type openAIRequest struct {
 	Messages  []openAIMessage `json:"messages"`
 	Tools     []openAITool    `json:"tools,omitempty"`      // 无工具时不下发
 	MaxTokens int             `json:"max_tokens,omitempty"` // 为 0 时不下发
+	Stream    bool            `json:"stream,omitempty"`     // 为 false 时不下发（默认非流式）
 }
 
 // openAIMessage 是 OpenAI 协议里的一条消息。
@@ -104,6 +108,12 @@ type openAIMessage struct {
 	Role string `json:"role"`
 	// content 在「assistant 仅发起工具调用」时可能为空，故 omitempty。
 	Content string `json:"content,omitempty"`
+	// 思考 / 推理内容。不同后端字段名不一（Ollama/部分网关用 reasoning，
+	// DeepSeek-R1/vLLM 用 reasoning_content），两个都解析、取非空者。
+	// 这两个字段仅在「解析响应」时有意义；构造请求时从不赋值，omitempty
+	// 保证不会回传给模型（思考不该喂回去）。
+	Reasoning        string `json:"reasoning,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// 仅 assistant 发起工具调用时出现。
 	ToolCalls []openAIToolCall `json:"tool_calls,omitempty"`
 	// 仅 role=tool 时出现：标明本结果对应哪次调用。
@@ -151,6 +161,43 @@ type openAIResponse struct {
 type openAIChoice struct {
 	Message      openAIMessage `json:"message"`
 	FinishReason string        `json:"finish_reason"`
+}
+
+// --- 流式（SSE）专用 DTO ---
+// 流式响应是一串 `data: {chunk}` 事件，每个 chunk 的 choice 里是「增量」(delta)，
+// 而不是完整 message：content / reasoning 一片片来，tool_calls 也按 index 分片到达。
+
+// openAIStreamChunk 是流式里的一个 chunk（一条 data: 行的 JSON）。
+type openAIStreamChunk struct {
+	Choices []openAIStreamChoice `json:"choices"`
+	Error   json.RawMessage      `json:"error"` // 某些网关会在流里塞 error
+}
+
+// openAIStreamChoice 是 chunk 里的候选，核心是 delta。
+type openAIStreamChoice struct {
+	Delta        openAIDelta `json:"delta"`
+	FinishReason string      `json:"finish_reason"`
+}
+
+// openAIDelta 是一次增量：各字段都可能为空（本片没这部分内容）。
+type openAIDelta struct {
+	Content          string                `json:"content"`
+	Reasoning        string                `json:"reasoning"`
+	ReasoningContent string                `json:"reasoning_content"`
+	ToolCalls        []openAIDeltaToolCall `json:"tool_calls"`
+}
+
+// openAIDeltaToolCall 是工具调用的一个分片。
+// Index 标明它属于第几个调用（用来把分片拼回完整调用）；
+// 通常 id / name 只在首片出现，arguments 则跨多片拼接。
+type openAIDeltaToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 // ---------------------------------------------------------------------------
@@ -242,8 +289,9 @@ func toOpenAITools(tools []ToolSpec) []openAITool {
 //     空则兜底为 "stop"。
 func fromOpenAIChoice(choice openAIChoice) *Response {
 	msg := Message{
-		Role:    RoleAssistant,
-		Content: choice.Message.Content,
+		Role:      RoleAssistant,
+		Content:   choice.Message.Content,
+		Reasoning: pickReasoning(choice.Message.Reasoning, choice.Message.ReasoningContent),
 	}
 
 	for _, tc := range choice.Message.ToolCalls {
@@ -274,13 +322,17 @@ func fromOpenAIChoice(choice openAIChoice) *Response {
 // ---------------------------------------------------------------------------
 
 // Chat 实现 llm.Provider：把对话历史 + 工具发给模型，返回归一化的下一步。
-func (p *OpenAIProvider) Chat(ctx context.Context, msgs []Message, tools []ToolSpec) (*Response, error) {
+//
+// 流式与否由 p.stream 决定，并且对调用方透明：两种模式都通过 sink 把文字吐出去、
+// 都返回组装好的完整 *Response。差别只在内部——非流式一次性解析，流式边读 SSE 边解析。
+func (p *OpenAIProvider) Chat(ctx context.Context, msgs []Message, tools []ToolSpec, sink StreamSink) (*Response, error) {
 	// 1) 组装 OpenAI 请求体。
 	reqBody := openAIRequest{
 		Model:     p.model,
 		Messages:  toOpenAIMessages(msgs),
 		Tools:     toOpenAITools(tools),
 		MaxTokens: p.maxTokens, // 为 0 时 omitempty 省略
+		Stream:    p.stream,    // 为 false 时 omitempty 省略
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -298,6 +350,9 @@ func (p *OpenAIProvider) Chat(ctx context.Context, msgs []Message, tools []ToolS
 	}
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	if p.stream {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 
 	// 4) 发请求。
 	resp, err := p.httpClient.Do(req)
@@ -306,38 +361,172 @@ func (p *OpenAIProvider) Chat(ctx context.Context, msgs []Message, tools []ToolS
 	}
 	defer resp.Body.Close()
 
-	// 5) 读全响应体（无论成功失败都要读，便于报错时带上原文）。
-	respBytes, err := io.ReadAll(resp.Body)
+	// 5) 非 200 一律视为失败：读出 body（可能是 JSON error）一并带进错误信息。
+	//    这一步对流式 / 非流式相同——出错时服务端给的都不是正常内容。
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai: 请求失败 (status=%d): %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// 6) 按模式分派解析。两条路都会：边解析边喂 sink，最后返回完整 Response。
+	if p.stream {
+		return parseSSE(resp.Body, sink)
+	}
+	return parseOnce(resp.Body, sink)
+}
+
+// parseOnce 解析「非流式」整段响应，并把整段内容当作一次 delta 喂给 sink。
+func parseOnce(r io.Reader, sink StreamSink) (*Response, error) {
+	respBytes, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("openai: 读取响应失败: %w", err)
 	}
 
-	// 6) 解析响应。
 	var parsed openAIResponse
-	// 注意：即便 JSON 解析失败，下面的错误分支也会带上原始 body，方便排查。
 	jsonErr := json.Unmarshal(respBytes, &parsed)
 
-	// 7) 错误判定：HTTP 非 200，或响应体里带顶层 error 对象。
-	//    任一命中即视为失败，返回含状态码 + 原始 body 的错误。
-	if resp.StatusCode != http.StatusOK || hasTopLevelError(parsed.Error) {
-		return nil, fmt.Errorf("openai: 请求失败 (status=%d): %s",
-			resp.StatusCode, strings.TrimSpace(string(respBytes)))
+	// 即便 HTTP 200，某些网关也会塞顶层 error，先判这个。
+	if hasTopLevelError(parsed.Error) {
+		return nil, fmt.Errorf("openai: 请求失败: %s", strings.TrimSpace(string(respBytes)))
 	}
-
-	// 走到这里说明 HTTP 200 且无 error，但仍要确认 JSON 能正常解析。
 	if jsonErr != nil {
 		return nil, fmt.Errorf("openai: 解析响应 JSON 失败: %w (body=%s)",
 			jsonErr, strings.TrimSpace(string(respBytes)))
 	}
-
-	// 8) 必须有候选回复。
 	if len(parsed.Choices) == 0 {
 		return nil, fmt.Errorf("openai: 响应不含任何 choices (body=%s)",
 			strings.TrimSpace(string(respBytes)))
 	}
 
-	// 9) 取第一个候选，翻译回中立 Response。
-	return fromOpenAIChoice(parsed.Choices[0]), nil
+	out := fromOpenAIChoice(parsed.Choices[0])
+	// 非流式 = 一段的流式：把整段思考 / 正文各当一次 delta 发出去，统一显示路径。
+	emit(sink, out.Message.Reasoning, out.Message.Content)
+	return out, nil
+}
+
+// parseSSE 解析「流式」响应：逐行扫 `data:` 事件，边解析边喂 sink，最后组装成完整 Response。
+//
+// 关键点：
+//   - content / reasoning 一片片来，累加即可；
+//   - tool_calls 分片到达，按 index 把 id / name / arguments 拼回完整调用；
+//   - 遇到 [DONE] 结束；个别坏行容错跳过，不中断整条流。
+func parseSSE(r io.Reader, sink StreamSink) (*Response, error) {
+	var (
+		content   strings.Builder
+		reasoning strings.Builder
+		acc       = map[int]*accTool{} // index → 累积中的工具调用
+		order     []int                // 记录 index 首次出现的顺序，保证结果有序
+		finish    string
+	)
+
+	sc := bufio.NewScanner(r)
+	// 放大行缓冲：单个 SSE 事件可能较长（长 JSON），默认 64KB 上限不够稳妥。
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		// SSE 数据行形如 "data: {...}"；其它行（event: / 注释 / 空行）忽略。
+		data, ok := strings.CutPrefix(sc.Text(), "data:")
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk openAIStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // 坏行跳过，保持整条流不中断
+		}
+		if hasTopLevelError(chunk.Error) {
+			return nil, fmt.Errorf("openai: 流式响应报错: %s", strings.TrimSpace(string(chunk.Error)))
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		choice := chunk.Choices[0]
+		d := choice.Delta
+
+		if rd := pickReasoning(d.Reasoning, d.ReasoningContent); rd != "" {
+			reasoning.WriteString(rd)
+			sink.OnReasoning(rd)
+		}
+		if d.Content != "" {
+			content.WriteString(d.Content)
+			sink.OnContent(d.Content)
+		}
+		for _, tc := range d.ToolCalls {
+			a, ok := acc[tc.Index]
+			if !ok {
+				a = &accTool{}
+				acc[tc.Index] = a
+				order = append(order, tc.Index)
+			}
+			if tc.ID != "" {
+				a.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				a.name = tc.Function.Name
+			}
+			a.args.WriteString(tc.Function.Arguments)
+		}
+		if choice.FinishReason != "" {
+			finish = choice.FinishReason
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("openai: 读取流式响应失败: %w", err)
+	}
+
+	msg := Message{
+		Role:      RoleAssistant,
+		Content:   content.String(),
+		Reasoning: reasoning.String(),
+	}
+	for _, idx := range order {
+		a := acc[idx]
+		msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+			ID:   a.id,
+			Name: a.name,
+			Args: json.RawMessage(a.args.String()),
+		})
+	}
+
+	stop := finish
+	if len(msg.ToolCalls) > 0 {
+		stop = "tool_calls"
+	} else if stop == "" {
+		stop = "stop"
+	}
+	return &Response{Message: msg, StopReason: stop}, nil
+}
+
+// accTool 是流式里一个「正在被分片拼接」的工具调用。
+type accTool struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// emit 把非空的思考 / 正文各发一次给 sink（约定不转发空串）。
+func emit(sink StreamSink, reasoning, content string) {
+	if reasoning != "" {
+		sink.OnReasoning(reasoning)
+	}
+	if content != "" {
+		sink.OnContent(content)
+	}
+}
+
+// pickReasoning 在两种字段名里取非空者（reasoning 优先，回退 reasoning_content）。
+func pickReasoning(reasoning, reasoningContent string) string {
+	if reasoning != "" {
+		return reasoning
+	}
+	return reasoningContent
 }
 
 // hasTopLevelError 判断响应里是否带了顶层 "error" 对象。

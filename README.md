@@ -66,6 +66,7 @@ zsh-agent 已就绪（后端 https://203.0.113.10:443/v1，模型 qwen3:8b）。
 | `model` | 是 | 模型名，例如 `qwen3:8b` |
 | `max_tokens` | 否 | 单次回复 token 上限，默认 `4096` |
 | `system_prompt` | 否 | 自定义系统提示词，留空用内置默认 |
+| `stream` | 否 | 是否用 SSE 流式接收，默认 `false`。开启后思考与正文逐字实时显示（需后端支持 `stream:true`） |
 | `insecure_skip_verify` | 否 | 手动控制是否跳过 TLS 证书校验。不写则按地址自动判断（见下） |
 
 配置文件路径默认 `./config.json`，可用环境变量覆盖：
