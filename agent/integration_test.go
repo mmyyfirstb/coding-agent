@@ -67,7 +67,9 @@ func (f *fakeUI) ConfirmTool(name, preview string) bool {
 	f.confirmed = append(f.confirmed, name)
 	return true
 }
-func (f *fakeUI) ToolOutput(s string) { f.toolOutputs = append(f.toolOutputs, s) }
+func (f *fakeUI) ToolOutput(s string)                             { f.toolOutputs = append(f.toolOutputs, s) }
+func (f *fakeUI) ReadLine(prompt string) (string, Outcome)        { return "", OutcomeEOF }
+func (f *fakeUI) WatchInterrupt(cancel context.CancelFunc) func() { return func() {} }
 
 func TestAgentRun_EndToEnd_ToolCallThenFinish(t *testing.T) {
 	var round int

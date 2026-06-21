@@ -2,30 +2,31 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"strings"
 )
 
-// TerminalUI 是 UI 接口的"终端实现"：直接和坐在命令行前的人交互。
-//
-// 它把输入输出都做成可注入的字段，而不是写死 os.Stdin / os.Stdout：
-//   - 真跑的时候传 os.Stdin / os.Stdout；
-//   - 写测试的时候传 strings.Reader / bytes.Buffer，就能断言交互结果。
-//
-// 这是 ui.go 里抽象的"换一个 UI 实现即可"的具体例子。
 type TerminalUI struct {
-	in  *bufio.Reader // 包一层 bufio，方便按行读用户输入
-	out io.Writer     // 所有展示给人看的内容都写到这里
+	in   *bufio.Reader // 非 raw 回退时按行读
+	out  io.Writer
+	keys chan Key // raw 模式下由 pump 喂键
+	raw  bool
 }
 
-// NewTerminalUI 用给定的输入、输出构造一个终端 UI。
-// in 会被包进 bufio.Reader，这样后面可以用 ReadString 一次读一整行。
+// NewTerminalUI 构造「非 raw（行模式）」终端 UI：沿用内核行编辑，简单稳妥，
+// 但不支持中文退格修复与打断。管道运行 / 非 tty 时用它。
 func NewTerminalUI(in io.Reader, out io.Writer) *TerminalUI {
-	return &TerminalUI{
-		in:  bufio.NewReader(in),
-		out: out,
-	}
+	return &TerminalUI{in: bufio.NewReader(in), out: out}
+}
+
+// NewRawTerminalUI 构造「raw 模式」终端 UI：自起 pump 独占读 in，提供 rune/宽度
+// 感知的行编辑与 ESC/Ctrl-C 打断。调用方须已通过 EnableRaw 把终端切到 raw。
+func NewRawTerminalUI(in io.Reader, out io.Writer) *TerminalUI {
+	t := &TerminalUI{out: out, keys: make(chan Key, 256), raw: true}
+	go pump(in, t.keys)
+	return t
 }
 
 // Sink 返回一个新的 terminalSink，负责把本回合模型输出的思考 / 正文实时打到终端。
@@ -81,37 +82,28 @@ func (s *terminalSink) Close() {
 	}
 }
 
-// ConfirmTool 在执行工具前征求用户同意，是这套 UI 的"安全闸"。
-//
-// 交互设计上的两个取舍：
-//  1. 用黄色高亮把"即将执行的命令"标出来（ANSI \033[33m...\033[0m）。
-//     黄色 = "注意，马上要动手了"，让人一眼看到 agent 准备做什么。
-//  2. 默认 Yes（提示 [Y/n]，大写 Y 表示回车即同意）。
-//     因为绝大多数情况下用户就是想让它跑，默认放行能少按一次键；
-//     只有用户明确表达拒绝时才拦下来。
-//
-// 返回值语义（什么算"否"、什么算"是"）：
-//   - 仅当用户输入去掉空格、转小写后等于 "n" 或 "no" 时，判为拒绝，
-//     打印"（已拒绝）"并返回 false；
-//   - 其余一切情况都算同意，返回 true——
-//     包括直接回车（空输入）、输入别的内容、甚至读到 EOF / 出错。
-//     这里刻意选择"出错也放行"以保持行为简单、可预测：
-//     这一层只负责"明确说不就别跑"，不替用户做更复杂的判断。
 func (t *TerminalUI) ConfirmTool(name, preview string) bool {
-	// 黄色一行：标出工具名 + 参数预览。前面留一个换行让它更醒目。
-	// 缩进两格，把「工具区」和左侧顶格的对话文字在视觉上分开成一组。
-	// 这里刻意保持黄色、不调暗——它是执行前的安全闸，黄色 = “要动手了，注意看”，
-	// 调暗会削弱警示。参数原样打印（不解析），保住 UI 层不依赖具体工具的分层。
 	fmt.Fprintf(t.out, "\n  \033[33m▶ %s %s\033[0m\n", name, preview)
-	// 提示语同样缩进、不带换行，让光标停在同一行等用户输入。
-	fmt.Fprint(t.out, "  执行？[Y/n] ")
+	const prompt = "  执行？[Y/n] "
 
-	// 读一整行。即使读取出错（比如 EOF），也按"默认 Yes"继续往下判断。
-	line, _ := t.in.ReadString('\n')
-	answer := strings.ToLower(strings.TrimSpace(line))
+	var line string
+	if t.raw {
+		drainKeys(t.keys)
+		// escCancels=true：ESC 直接返回 OutcomeCancel，在确认处表示拒绝。
+		// Ctrl-C → OutcomeInterrupt，Ctrl-D → OutcomeEOF，均视为拒绝。
+		l, oc := ReadLine(t.keys, t.out, prompt, true)
+		if oc != OutcomeSubmit {
+			fmt.Fprint(t.out, "  （已拒绝）\n")
+			return false
+		}
+		line = l
+	} else {
+		fmt.Fprint(t.out, prompt)
+		l, _ := t.in.ReadString('\n')
+		line = l
+	}
 
-	// 只有明确说"不"才拒绝。
-	if answer == "n" || answer == "no" {
+	if answer := strings.ToLower(strings.TrimSpace(line)); answer == "n" || answer == "no" {
 		fmt.Fprint(t.out, "  （已拒绝）\n")
 		return false
 	}
@@ -131,5 +123,63 @@ func (t *TerminalUI) ToolOutput(s string) {
 	fmt.Fprintf(t.out, "\033[2m%s\033[0m", s)
 	if !strings.HasSuffix(s, "\n") {
 		fmt.Fprint(t.out, "\n")
+	}
+}
+
+// ReadLine 读取一行用户输入。raw 模式走 rune/宽度感知行编辑器；否则回退按行读。
+func (t *TerminalUI) ReadLine(prompt string) (string, Outcome) {
+	if !t.raw {
+		fmt.Fprint(t.out, "\n"+prompt)
+		line, err := t.in.ReadString('\n')
+		if err == io.EOF {
+			return "", OutcomeEOF
+		}
+		return strings.TrimSpace(line), OutcomeSubmit
+	}
+	fmt.Fprint(t.out, "\n") // 空行分隔，打一次（不进重绘，避免滚屏）
+	drainKeys(t.keys)       // 丢弃陈旧 type-ahead
+	// escCancels=false：主 REPL 提示符，ESC 只清空当前行，不返回 OutcomeCancel。
+	line, oc := ReadLine(t.keys, t.out, prompt, false)
+	return strings.TrimSpace(line), oc
+}
+
+// WatchInterrupt 在可取消操作期间监听 ESC / Ctrl-C，命中即 cancel。
+// 返回的 stop 停止监听并等待 goroutine 退出，交还键盘所有权。
+func (t *TerminalUI) WatchInterrupt(cancel context.CancelFunc) func() {
+	if !t.raw {
+		return func() {} // 非 raw：不支持打断
+	}
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stopCh:
+				return
+			case k, ok := <-t.keys:
+				if !ok {
+					return
+				}
+				if k.Kind == KeyEsc || k.Kind == KeyCtrlC {
+					cancel()
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stopCh)
+		<-done
+	}
+}
+
+// drainKeys 非阻塞地清空 keys 里残留的陈旧按键。
+func drainKeys(keys <-chan Key) {
+	for {
+		select {
+		case <-keys:
+		default:
+			return
+		}
 	}
 }

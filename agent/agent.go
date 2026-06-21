@@ -53,52 +53,62 @@ func New(p llm.Provider, t *tools.Registry, ui UI) *Agent {
 // 入参 history 是到目前为止的完整对话（含 system / user 等）；
 // 返回值是追加了本回合所有 assistant 回复与工具结果后的新历史。
 func (a *Agent) Run(ctx context.Context, history []llm.Message) ([]llm.Message, error) {
+	startLen := len(history) // 打断时回滚到这里（含本回合的 user 消息）
 	for step := 0; step < maxSteps; step++ {
-		// 1. 问模型：把完整历史 + 当前可用工具发过去。
-		//    sink 负责把模型的思考 / 正文实时显示出来（流式逐字、非流式整段），
-		//    所以这里不再单独调 UI 展示文字——显示已在 Chat 内部通过 sink 完成。
+		// 1. 问模型；WatchInterrupt 期间按 ESC/Ctrl-C 会 cancel 掉 cctx，
+		//    令正在读的 SSE/HTTP 立刻报错返回。
 		sink := a.ui.Sink()
-		resp, err := a.provider.Chat(ctx, history, a.tools.Specs(), sink)
-		sink.Close() // 收尾（补换行 / 重置样式）；出错也要收尾，别让终端样式残留。
+		cctx, cancel := context.WithCancel(ctx)
+		stop := a.ui.WatchInterrupt(cancel)
+		resp, err := a.provider.Chat(cctx, history, a.tools.Specs(), sink)
+		stop()
+		canceled := cctx.Err() == context.Canceled
+		cancel()
+		sink.Close()
+		if canceled {
+			return history[:startLen], context.Canceled // 回滚本回合 append
+		}
 		if err != nil {
 			return history, err
 		}
 
-		// 2. 把模型这次的整段回复（文字 + 可能的工具调用）记进历史。
+		// 2. 记进历史。
 		history = append(history, resp.Message)
 
-		// 3. 模型不再要求调工具 → 本回合结束。
+		// 3. 不再调工具 → 收工。
 		if resp.StopReason != "tool_calls" {
 			return history, nil
 		}
 
-		// 4. 逐个执行模型请求的工具，把每个结果作为一条 tool 消息追加回历史。
+		// 4. 逐个执行工具（先确认；执行期间同样可打断）。
 		for _, call := range resp.Message.ToolCalls {
 			tool, ok := a.tools.Get(call.Name)
 			if !ok {
 				history = append(history, llm.ToolResult(call.ID, "未知工具: "+call.Name, true))
 				continue
 			}
-
-			// 执行前先经 UI 确认（终端实现就是 y/n 询问）。
 			if !a.ui.ConfirmTool(call.Name, string(call.Args)) {
 				history = append(history, llm.ToolResult(call.ID, "用户拒绝执行此命令。", true))
 				continue
 			}
 
-			out, err := tool.Run(ctx, call.Args)
-			if err != nil {
-				// 工具真正失败（如无法启动子进程）：把错误并进结果文本，
-				// 并以 isError=true 回填，让模型知道这步没成。
-				out += "\n[执行错误: " + err.Error() + "]"
+			tctx, tcancel := context.WithCancel(ctx)
+			tstop := a.ui.WatchInterrupt(tcancel)
+			out, rerr := tool.Run(tctx, call.Args)
+			tstop()
+			tcanceled := tctx.Err() == context.Canceled
+			tcancel()
+			if tcanceled {
+				return history[:startLen], context.Canceled
 			}
-			// UI 展示完整输出（人要看到真实结果）；但回填进历史的副本做截断，
-			// 避免超长输出塞满模型上下文窗口（见 maxToolOutputRunes / clamp.go）。
+			if rerr != nil {
+				out += "\n[执行错误: " + rerr.Error() + "]"
+			}
+			// UI 展示完整输出；回填历史的副本做截断（保护上下文窗口）。
 			a.ui.ToolOutput(out)
-			history = append(history, llm.ToolResult(call.ID, clampToolOutput(out, maxToolOutputRunes), err != nil))
+			history = append(history, llm.ToolResult(call.ID, clampToolOutput(out, maxToolOutputRunes), rerr != nil))
 		}
 	}
 
-	// 走到这里说明连续 maxSteps 轮都在调工具还没收尾，按异常处理。
 	return history, fmt.Errorf("达到最大步数 %d，已停止（可能陷入工具循环）", maxSteps)
 }
