@@ -166,7 +166,8 @@ func decodeUTF8(first byte, next func() (byte, int)) (rune, bool) {
 		bs = append(bs, c)
 	}
 	r, size := utf8.DecodeRune(bs)
-	if r == utf8.RuneError || size != n {
+	// utf8.RuneError(U+FFFD) 本身是合法字符，只有 size==1 时才说明解码失败。
+	if (r == utf8.RuneError && size == 1) || size != n {
 		return 0, false
 	}
 	return r, true

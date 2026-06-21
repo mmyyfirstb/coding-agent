@@ -89,8 +89,10 @@ func (t *TerminalUI) ConfirmTool(name, preview string) bool {
 	var line string
 	if t.raw {
 		drainKeys(t.keys)
-		l, oc := ReadLine(t.keys, t.out, prompt)
-		if oc != OutcomeSubmit { // ESC / Ctrl-C / Ctrl-D 在确认处 = 拒绝
+		// escCancels=true：ESC 直接返回 OutcomeCancel，在确认处表示拒绝。
+		// Ctrl-C → OutcomeInterrupt，Ctrl-D → OutcomeEOF，均视为拒绝。
+		l, oc := ReadLine(t.keys, t.out, prompt, true)
+		if oc != OutcomeSubmit {
 			fmt.Fprint(t.out, "  （已拒绝）\n")
 			return false
 		}
@@ -136,7 +138,8 @@ func (t *TerminalUI) ReadLine(prompt string) (string, Outcome) {
 	}
 	fmt.Fprint(t.out, "\n") // 空行分隔，打一次（不进重绘，避免滚屏）
 	drainKeys(t.keys)       // 丢弃陈旧 type-ahead
-	line, oc := ReadLine(t.keys, t.out, prompt)
+	// escCancels=false：主 REPL 提示符，ESC 只清空当前行，不返回 OutcomeCancel。
+	line, oc := ReadLine(t.keys, t.out, prompt, false)
 	return strings.TrimSpace(line), oc
 }
 

@@ -16,12 +16,15 @@ const (
 	OutcomeSubmit    Outcome = iota // 回车提交，line 有效
 	OutcomeEOF                      // 空行 Ctrl-D 或输入流关闭：请求退出
 	OutcomeInterrupt                // Ctrl-C：放弃本行，重来
+	OutcomeCancel                   // ESC 取消，仅在 escCancels 模式，如工具确认处
 )
 
 // ReadLine 从 keys 读键编辑一行，返回最终文本与结局。
 //   - prompt 是「单行」提示符（可含 ANSI 颜色码，但不要含换行，否则重绘会滚屏）。
 //   - 调用方负责在调用前安排好垂直间距（如先打一个换行）。
-func ReadLine(keys <-chan Key, out io.Writer, prompt string) (string, Outcome) {
+//   - escCancels=true 时，ESC 立即返回 ("", OutcomeCancel)，适合工具确认等「ESC=拒绝」场景；
+//     escCancels=false 时，ESC 仅清空当前行继续编辑，适合主 REPL 提示符。
+func ReadLine(keys <-chan Key, out io.Writer, prompt string, escCancels bool) (string, Outcome) {
 	var buf []rune
 	cursor := 0 // 光标在 buf 中的 rune 下标，0..len(buf)
 	promptW := displayWidth(prompt)
@@ -78,7 +81,13 @@ func ReadLine(keys <-chan Key, out io.Writer, prompt string) (string, Outcome) {
 			buf = append(buf[:i], buf[cursor:]...)
 			cursor = i
 		case KeyEsc:
-			buf = buf[:0] // 裸 ESC = 清空当前行
+			if escCancels {
+				// escCancels 模式（如工具确认处）：ESC = 取消，立即返回。
+				fmt.Fprint(out, "\r\n")
+				return "", OutcomeCancel
+			}
+			// 普通模式（主 REPL）：ESC = 清空当前行，继续编辑。
+			buf = buf[:0]
 			cursor = 0
 		case KeyEnter:
 			fmt.Fprint(out, "\r\n")
