@@ -1,4 +1,4 @@
-package agent
+package terminal
 
 // keys.go：输入 pump —— 把原始字节流解码成中立的「按键事件」。
 // 它是全程唯一读 stdin 的地方；行编辑器与打断监听都只消费它产出的 Key。

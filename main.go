@@ -10,7 +10,7 @@
 //	      ▼
 //	llm.OpenAIProvider 把"问模型"封装成统一的 Provider 接口（含纯 IP 自动免校验 TLS）
 //	tools.Registry     注册可供模型调用的工具（这里只有 bash）
-//	agent.TerminalUI   负责与终端用户交互（展示 / y-n 确认）
+//	terminal.TerminalUI 实现 agent.UI，负责与终端用户交互（展示 / y-n 确认）
 //	      │
 //	      ▼
 //	agent.Agent.Run    核心循环：问模型→执行工具→喂回结果，直到模型收尾
@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"zsh-agent/agent"
+	"zsh-agent/agent/terminal"
 	"zsh-agent/config"
 	"zsh-agent/llm"
 	"zsh-agent/tools"
@@ -51,7 +52,7 @@ func main() {
 
 	// 2. 尝试进 raw 模式：成功则启用 rune/宽度行编辑 + ESC 打断；失败（非 tty /
 	//    无 stty）则降级为普通行模式。defer 还原，保证退出时终端干净。
-	restore, raw := agent.EnableRaw()
+	restore, raw := terminal.EnableRaw()
 	defer restore()
 
 	// 3. 按配置组装各层。
@@ -63,9 +64,9 @@ func main() {
 	if raw {
 		// 把 os.Stdin 适配回 raw tty 应有的「超时=(0,nil)」语义：否则 Go 的 os.File 会把
 		// VMIN=0/VTIME 的读超时当 io.EOF，让输入 pump 在第一次空闲超时就误判流结束并退出。
-		ui = agent.NewRawTerminalUI(agent.PollingTTYReader(os.Stdin), os.Stdout)
+		ui = terminal.NewRawTerminalUI(terminal.PollingTTYReader(os.Stdin), os.Stdout)
 	} else {
-		ui = agent.NewTerminalUI(os.Stdin, os.Stdout)
+		ui = terminal.NewTerminalUI(os.Stdin, os.Stdout)
 	}
 	ag := agent.New(provider, reg, ui)
 
