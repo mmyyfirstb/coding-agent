@@ -14,6 +14,14 @@ import (
 // 防止模型与工具陷入互相触发的死循环把对话无限拖下去。
 const maxSteps = 50
 
+// maxToolOutputRunes 是「单条工具结果回填进历史」时允许的最大字符数。
+//
+// 超出部分会被 clampToolOutput 截掉中间、只留头尾（见 clamp.go）。这是为了
+// 保护模型的上下文窗口：bash 等命令动辄吐出几十 KB，原样累积会迅速塞满窗口、
+// 稀释注意力，甚至把最早的 system prompt 挤出窗口。注意这只影响「喂回模型的
+// 副本」，UI 展示给人看的仍是完整输出。
+const maxToolOutputRunes = 4000
+
 // Agent 把三件可替换的东西组装在一起，对外只暴露一个 Run：
 //   - provider：LLM 后端（怎么问模型）
 //   - tools：工具注册表（模型能调用哪些工具）
@@ -84,8 +92,10 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message) ([]llm.Message, 
 				// 并以 isError=true 回填，让模型知道这步没成。
 				out += "\n[执行错误: " + err.Error() + "]"
 			}
+			// UI 展示完整输出（人要看到真实结果）；但回填进历史的副本做截断，
+			// 避免超长输出塞满模型上下文窗口（见 maxToolOutputRunes / clamp.go）。
 			a.ui.ToolOutput(out)
-			history = append(history, llm.ToolResult(call.ID, out, err != nil))
+			history = append(history, llm.ToolResult(call.ID, clampToolOutput(out, maxToolOutputRunes), err != nil))
 		}
 	}
 

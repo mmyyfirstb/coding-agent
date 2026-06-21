@@ -44,8 +44,9 @@ func (echoTool) Run(_ context.Context, args json.RawMessage) (string, error) {
 
 // fakeUI 自动同意所有工具，并通过 sink 记录展示过的思考 / 正文，便于断言。
 type fakeUI struct {
-	confirmed []string
-	sink      *fakeSink // 最近一次 Sink() 产出的 sink
+	confirmed   []string
+	sink        *fakeSink // 最近一次 Sink() 产出的 sink
+	toolOutputs []string  // 记录每次 ToolOutput 收到的内容，便于断言「UI 拿到完整输出」
 }
 
 // fakeSink 收集 sink 收到的思考与正文增量。
@@ -66,7 +67,7 @@ func (f *fakeUI) ConfirmTool(name, preview string) bool {
 	f.confirmed = append(f.confirmed, name)
 	return true
 }
-func (f *fakeUI) ToolOutput(string) {}
+func (f *fakeUI) ToolOutput(s string) { f.toolOutputs = append(f.toolOutputs, s) }
 
 func TestAgentRun_EndToEnd_ToolCallThenFinish(t *testing.T) {
 	var round int
