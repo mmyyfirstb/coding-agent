@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"zsh-agent/llm"
@@ -41,13 +42,26 @@ func (echoTool) Run(_ context.Context, args json.RawMessage) (string, error) {
 	return "echo: " + in.Text, nil
 }
 
-// fakeUI 自动同意所有工具，并记录展示过的内容，便于断言。
+// fakeUI 自动同意所有工具，并通过 sink 记录展示过的思考 / 正文，便于断言。
 type fakeUI struct {
 	confirmed []string
-	assistant []string
+	sink      *fakeSink // 最近一次 Sink() 产出的 sink
 }
 
-func (f *fakeUI) AssistantText(s string) { f.assistant = append(f.assistant, s) }
+// fakeSink 收集 sink 收到的思考与正文增量。
+type fakeSink struct {
+	reasoning strings.Builder
+	content   strings.Builder
+}
+
+func (s *fakeSink) OnReasoning(d string) { s.reasoning.WriteString(d) }
+func (s *fakeSink) OnContent(d string)   { s.content.WriteString(d) }
+func (s *fakeSink) Close()               {}
+
+func (f *fakeUI) Sink() OutputSink {
+	f.sink = &fakeSink{}
+	return f.sink
+}
 func (f *fakeUI) ConfirmTool(name, preview string) bool {
 	f.confirmed = append(f.confirmed, name)
 	return true
@@ -71,13 +85,13 @@ func TestAgentRun_EndToEnd_ToolCallThenFinish(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}`))
 			return
 		}
-		// 第二轮：记录收到的历史，并给出最终文字回复结束。
+		// 第二轮：记录收到的历史，并给出最终文字回复（含 reasoning）结束。
 		_ = json.Unmarshal(body, &round2)
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"完成了"},"finish_reason":"stop"}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"完成了","reasoning":"想一下"},"finish_reason":"stop"}]}`))
 	}))
 	defer srv.Close()
 
-	provider := llm.NewOpenAIProvider(srv.URL, "sk-test", "test-model", 0, nil)
+	provider := llm.NewOpenAIProvider(srv.URL, "sk-test", "test-model", 0, false, nil)
 	reg := tools.NewRegistry()
 	reg.Register(echoTool{})
 	ui := &fakeUI{}
@@ -100,8 +114,11 @@ func TestAgentRun_EndToEnd_ToolCallThenFinish(t *testing.T) {
 	if last.Role != llm.RoleAssistant || last.Content != "完成了" {
 		t.Fatalf("最终消息不对: role=%q content=%q", last.Role, last.Content)
 	}
-	if len(ui.assistant) == 0 || ui.assistant[len(ui.assistant)-1] != "完成了" {
-		t.Fatalf("UI 未展示最终回复: %v", ui.assistant)
+	if got := ui.sink.content.String(); got != "完成了" {
+		t.Fatalf("UI 未通过 sink 展示最终回复: %q", got)
+	}
+	if got := ui.sink.reasoning.String(); got != "想一下" {
+		t.Fatalf("UI 未通过 sink 展示思考: %q", got)
 	}
 	if len(ui.confirmed) != 1 || ui.confirmed[0] != "echo" {
 		t.Fatalf("期望确认过一次 echo 工具，实际: %v", ui.confirmed)

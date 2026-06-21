@@ -60,7 +60,7 @@ func main() {
 	stdin := bufio.NewReader(os.Stdin)
 
 	// 3. 按配置组装各层。
-	provider := llm.NewOpenAIProvider(cfg.BaseURL, cfg.APIKey, cfg.Model, cfg.MaxTokens, cfg.InsecureSkipVerify)
+	provider := llm.NewOpenAIProvider(cfg.BaseURL, cfg.APIKey, cfg.Model, cfg.MaxTokens, cfg.Stream, cfg.InsecureSkipVerify)
 	reg := tools.NewRegistry()
 	reg.Register(tools.Bash{}) // 想加工具？实现 tools.Tool 后在这里再 Register 一行即可。
 	ui := agent.NewTerminalUI(stdin, os.Stdout)
@@ -76,7 +76,9 @@ func main() {
 	// 5. REPL：读一行用户输入 → 跑一个 agent 回合 → 循环，Ctrl+D 退出。
 	fmt.Printf("zsh-agent 已就绪（后端 %s，模型 %s）。输入需求后回车，Ctrl+D 退出。\n", cfg.BaseURL, cfg.Model)
 	for {
-		fmt.Print("\n\033[36m>\033[0m ")
+		// 青色「你 ›」标签：和模型回复的绿色「助手」标签对应，
+		// 让回看屏幕时一眼能分清哪行是自己输入的。你打的字保持默认色。
+		fmt.Print("\n\033[36m你 ›\033[0m ")
 		line, err := stdin.ReadString('\n')
 		if err == io.EOF {
 			fmt.Println()

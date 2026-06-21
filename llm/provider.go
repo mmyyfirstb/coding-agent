@@ -13,5 +13,8 @@ type Provider interface {
 	//   - 实现负责把中立类型翻译成自家协议、发请求、再把响应翻译回中立 Response。
 	//   - 返回的 Response.StopReason 必须归一化为 "tool_calls"（模型想调工具）
 	//     或其它值（通常 "stop"，表示本轮说完）。
-	Chat(ctx context.Context, msgs []Message, tools []ToolSpec) (*Response, error)
+	//   - 边收到文字（思考 / 正文）边通过 sink 吐出来，供上层实时显示。
+	//     非流式实现也要走 sink：拿到整段后当作「一次 delta」调用一次即可，
+	//     这样上层不必关心是否流式（见 StreamSink 注释）。
+	Chat(ctx context.Context, msgs []Message, tools []ToolSpec, sink StreamSink) (*Response, error)
 }

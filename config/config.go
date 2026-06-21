@@ -44,6 +44,12 @@ type Config struct {
 	//   - 非 nil ：配置里明确写了 true/false → 手动覆盖自动判断。
 	// 普通 bool 无法区分「没写」和「写了 false」，所以才用指针。
 	InsecureSkipVerify *bool `json:"insecure_skip_verify,omitempty"` // nil=按 IP 自动判断；非 nil=手动覆盖
+
+	// Stream 控制是否用 SSE 流式接收回复。可选，默认 false。
+	//   - true ：思考与正文逐字实时显示（边收边显示）。
+	//   - false：整段一次性返回后再显示。
+	// 需要后端支持 stream:true（Ollama / vLLM / 多数网关都支持）。
+	Stream bool `json:"stream,omitempty"`
 }
 
 // Load 从 path 读取并解析配置，完成校验与默认值填充后返回。

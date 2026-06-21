@@ -9,8 +9,18 @@ package llm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+// recSink 是个记录型 StreamSink：把收到的思考 / 正文增量拼起来，便于断言。
+type recSink struct {
+	reasoning strings.Builder
+	content   strings.Builder
+}
+
+func (s *recSink) OnReasoning(d string) { s.reasoning.WriteString(d) }
+func (s *recSink) OnContent(d string)   { s.content.WriteString(d) }
 
 // boolPtr 是个小工具：返回指向 b 的指针，便于构造 *bool 覆盖项。
 func boolPtr(b bool) *bool { return &b }
@@ -208,5 +218,88 @@ func TestFromOpenAIChoice_PlainText(t *testing.T) {
 	})
 	if r2.StopReason != "stop" {
 		t.Fatalf("空 finish_reason 应兜底为 stop，实际 %q", r2.StopReason)
+	}
+}
+
+// TestFromOpenAIChoice_Reasoning 验证两种思考字段名都能解析（reasoning 优先，
+// 否则回退 reasoning_content），结果都落进中立 Message.Reasoning。
+func TestFromOpenAIChoice_Reasoning(t *testing.T) {
+	// 字段名 reasoning（Ollama 等）。
+	r1 := fromOpenAIChoice(openAIChoice{
+		Message:      openAIMessage{Role: RoleAssistant, Content: "答案", Reasoning: "我在想"},
+		FinishReason: "stop",
+	})
+	if r1.Message.Reasoning != "我在想" {
+		t.Fatalf("reasoning 未解析: %q", r1.Message.Reasoning)
+	}
+
+	// 字段名 reasoning_content（DeepSeek-R1 / vLLM）：reasoning 为空时回退采用。
+	r2 := fromOpenAIChoice(openAIChoice{
+		Message: openAIMessage{Role: RoleAssistant, Content: "答案", ReasoningContent: "另一种想"},
+	})
+	if r2.Message.Reasoning != "另一种想" {
+		t.Fatalf("reasoning_content 未回退解析: %q", r2.Message.Reasoning)
+	}
+}
+
+// TestParseSSE_ReasoningAndContent 验证流式解析：思考与正文一片片来，
+// 既要逐片喂给 sink，也要在最后拼成完整 Response。
+func TestParseSSE_ReasoningAndContent(t *testing.T) {
+	sse := `data: {"choices":[{"delta":{"reasoning":"想"}}]}
+data: {"choices":[{"delta":{"reasoning":"一下"}}]}
+data: {"choices":[{"delta":{"content":"你"}}]}
+data: {"choices":[{"delta":{"content":"好"}}]}
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+`
+	sink := &recSink{}
+	resp, err := parseSSE(strings.NewReader(sse), sink)
+	if err != nil {
+		t.Fatalf("parseSSE 出错: %v", err)
+	}
+
+	if resp.Message.Reasoning != "想一下" {
+		t.Fatalf("拼接后的 reasoning = %q, want 想一下", resp.Message.Reasoning)
+	}
+	if resp.Message.Content != "你好" {
+		t.Fatalf("拼接后的 content = %q, want 你好", resp.Message.Content)
+	}
+	if resp.StopReason != "stop" {
+		t.Fatalf("StopReason = %q, want stop", resp.StopReason)
+	}
+	// sink 也应逐片收到，最终拼接结果与 Response 一致。
+	if sink.reasoning.String() != "想一下" {
+		t.Fatalf("sink 收到的 reasoning = %q", sink.reasoning.String())
+	}
+	if sink.content.String() != "你好" {
+		t.Fatalf("sink 收到的 content = %q", sink.content.String())
+	}
+}
+
+// TestParseSSE_ToolCallFragments 验证流式里工具调用的分片累积：
+// id / name 只在首片出现，arguments 跨多片拼接，按 index 归并成一个完整调用。
+func TestParseSSE_ToolCallFragments(t *testing.T) {
+	sse := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+`
+	resp, err := parseSSE(strings.NewReader(sse), &recSink{})
+	if err != nil {
+		t.Fatalf("parseSSE 出错: %v", err)
+	}
+
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("工具调用数量 = %d, want 1", len(resp.Message.ToolCalls))
+	}
+	tc := resp.Message.ToolCalls[0]
+	if tc.ID != "call_1" || tc.Name != "bash" {
+		t.Fatalf("工具调用基础字段不对: %+v", tc)
+	}
+	if string(tc.Args) != `{"command":"ls"}` {
+		t.Fatalf("分片拼接后的 arguments = %s, want {\"command\":\"ls\"}", string(tc.Args))
+	}
+	if resp.StopReason != "tool_calls" {
+		t.Fatalf("StopReason = %q, want tool_calls", resp.StopReason)
 	}
 }

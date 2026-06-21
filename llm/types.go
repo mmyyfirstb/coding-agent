@@ -22,8 +22,11 @@ const (
 //   - assistant：用 Content（文字），若模型要调工具则填 ToolCalls
 //   - tool：用 ToolCallID（对应哪次调用）+ Content（结果）+ IsError
 type Message struct {
-	Role       string     // system / user / assistant / tool
-	Content    string     // 文本内容（assistant 请求工具时可能为空）
+	Role    string // system / user / assistant / tool
+	Content string // 文本内容（assistant 请求工具时可能为空）
+	// Reasoning 是 assistant 的「思考 / 推理」内容（部分模型会单独返回）。
+	// 仅用于展示，不回传给模型——思考不该喂回去（省 token，也更规范）。
+	Reasoning  string
 	ToolCalls  []ToolCall // 仅 assistant：模型请求调用的工具
 	ToolCallID string     // 仅 role=tool：对应哪个 ToolCall.ID
 	IsError    bool       // 仅 role=tool：该结果是否为错误（供 UI 展示）
@@ -47,6 +50,21 @@ type ToolSpec struct {
 type Response struct {
 	Message    Message // assistant 回复（可能含 ToolCalls）
 	StopReason string  // "stop"（说完了）/ "tool_calls"（想调工具），由 Provider 归一化
+}
+
+// StreamSink 接收模型输出的「增量」，是 Provider 把内容吐出来、UI 把内容显示出去
+// 之间唯一的细线。
+//
+// 关键设计：非流式 = 只有一个 chunk 的流式。
+//   - 流式 Provider：边读 SSE 边多次调用（每个 delta 一次）。
+//   - 非流式 Provider：拿到整段后，把整段当作「一次 delta」调用一次。
+//
+// 于是「是不是流式」对核心循环和 UI 完全透明——这层判断封死在 Provider 内部。
+//
+// 约定：实现者只会收到「非空」增量，Provider 不应转发空字符串。
+type StreamSink interface {
+	OnReasoning(delta string) // 思考（推理）增量
+	OnContent(delta string)   // 正文增量
 }
 
 // ToolResult 构造一条 role=tool 的消息，方便核心循环把工具执行结果回填进历史。

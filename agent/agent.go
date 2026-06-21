@@ -47,7 +47,11 @@ func New(p llm.Provider, t *tools.Registry, ui UI) *Agent {
 func (a *Agent) Run(ctx context.Context, history []llm.Message) ([]llm.Message, error) {
 	for step := 0; step < maxSteps; step++ {
 		// 1. 问模型：把完整历史 + 当前可用工具发过去。
-		resp, err := a.provider.Chat(ctx, history, a.tools.Specs())
+		//    sink 负责把模型的思考 / 正文实时显示出来（流式逐字、非流式整段），
+		//    所以这里不再单独调 UI 展示文字——显示已在 Chat 内部通过 sink 完成。
+		sink := a.ui.Sink()
+		resp, err := a.provider.Chat(ctx, history, a.tools.Specs(), sink)
+		sink.Close() // 收尾（补换行 / 重置样式）；出错也要收尾，别让终端样式残留。
 		if err != nil {
 			return history, err
 		}
@@ -55,17 +59,12 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message) ([]llm.Message, 
 		// 2. 把模型这次的整段回复（文字 + 可能的工具调用）记进历史。
 		history = append(history, resp.Message)
 
-		// 3. 有文字就先展示给用户看。
-		if resp.Message.Content != "" {
-			a.ui.AssistantText(resp.Message.Content)
-		}
-
-		// 4. 模型不再要求调工具 → 本回合结束。
+		// 3. 模型不再要求调工具 → 本回合结束。
 		if resp.StopReason != "tool_calls" {
 			return history, nil
 		}
 
-		// 5. 逐个执行模型请求的工具，把每个结果作为一条 tool 消息追加回历史。
+		// 4. 逐个执行模型请求的工具，把每个结果作为一条 tool 消息追加回历史。
 		for _, call := range resp.Message.ToolCalls {
 			tool, ok := a.tools.Get(call.Name)
 			if !ok {
