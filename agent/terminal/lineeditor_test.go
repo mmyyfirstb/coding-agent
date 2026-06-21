@@ -1,8 +1,10 @@
-package agent
+package terminal
 
 import (
 	"io"
 	"testing"
+
+	"zsh-agent/agent"
 )
 
 // feed 把一串 Key 塞进 channel 并关闭，供 ReadLine 消费。
@@ -24,7 +26,7 @@ func TestReadLine_ChineseBackspace(t *testing.T) {
 		Key{Kind: KeyEnter},
 	)
 	line, oc := ReadLine(keys, io.Discard, "> ", false)
-	if line != "中" || oc != OutcomeSubmit {
+	if line != "中" || oc != agent.OutcomeSubmit {
 		t.Fatalf("得到 (%q,%d)，期望 (\"中\",Submit)", line, oc)
 	}
 }
@@ -60,33 +62,33 @@ func TestReadLine_CtrlU(t *testing.T) {
 
 func TestReadLine_CtrlDEmpty(t *testing.T) {
 	_, oc := ReadLine(feed(Key{Kind: KeyCtrlD}), io.Discard, "> ", false)
-	if oc != OutcomeEOF {
-		t.Fatalf("空行 Ctrl-D 应 OutcomeEOF，得到 %d", oc)
+	if oc != agent.OutcomeEOF {
+		t.Fatalf("空行 Ctrl-D 应 agent.OutcomeEOF，得到 %d", oc)
 	}
 }
 
 func TestReadLine_CtrlCInterrupt(t *testing.T) {
 	_, oc := ReadLine(feed(Key{Kind: KeyRune, Rune: 'a'}, Key{Kind: KeyCtrlC}), io.Discard, "> ", false)
-	if oc != OutcomeInterrupt {
-		t.Fatalf("Ctrl-C 应 OutcomeInterrupt，得到 %d", oc)
+	if oc != agent.OutcomeInterrupt {
+		t.Fatalf("Ctrl-C 应 agent.OutcomeInterrupt，得到 %d", oc)
 	}
 }
 
-// TestReadLine_EscCancels 验证 escCancels=true 时 ESC 返回 OutcomeCancel（工具确认场景）。
+// TestReadLine_EscCancels 验证 escCancels=true 时 ESC 返回 agent.OutcomeCancel（工具确认场景）。
 func TestReadLine_EscCancels(t *testing.T) {
 	keys := feed(
 		Key{Kind: KeyRune, Rune: 'a'},
 		Key{Kind: KeyEsc},
 	)
 	line, oc := ReadLine(keys, io.Discard, "执行？[Y/n] ", true)
-	if oc != OutcomeCancel {
-		t.Fatalf("escCancels=true 时 ESC 应 OutcomeCancel，得到 oc=%d line=%q", oc, line)
+	if oc != agent.OutcomeCancel {
+		t.Fatalf("escCancels=true 时 ESC 应 agent.OutcomeCancel，得到 oc=%d line=%q", oc, line)
 	}
 }
 
 // TestReadLine_EscClearsLine 验证 escCancels=false 时 ESC 仅清空当前行，继续编辑（主 REPL 场景）。
 func TestReadLine_EscClearsLine(t *testing.T) {
-	// 输入 'a'，ESC 清空，再输入 'b'，回车 → 应返回 "b"（不是 "ab"，也不是 OutcomeCancel）。
+	// 输入 'a'，ESC 清空，再输入 'b'，回车 → 应返回 "b"（不是 "ab"，也不是 agent.OutcomeCancel）。
 	keys := feed(
 		Key{Kind: KeyRune, Rune: 'a'},
 		Key{Kind: KeyEsc},
@@ -94,7 +96,7 @@ func TestReadLine_EscClearsLine(t *testing.T) {
 		Key{Kind: KeyEnter},
 	)
 	line, oc := ReadLine(keys, io.Discard, "> ", false)
-	if line != "b" || oc != OutcomeSubmit {
+	if line != "b" || oc != agent.OutcomeSubmit {
 		t.Fatalf("escCancels=false 时 ESC 应清空行继续编辑，得到 (%q,%d)，期望 (\"b\",Submit)", line, oc)
 	}
 }
