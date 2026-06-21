@@ -4,6 +4,7 @@ package agent
 // raw（cbreak）模式，并提供还原。非 tty / 无 stty 时返回 enabled=false，调用方降级。
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -44,6 +45,28 @@ func EnableRaw() (restore func(), enabled bool) {
 	}()
 
 	return restore, true
+}
+
+// PollingTTYReader 把一个「VMIN=0/VTIME>0 的 raw tty」读端（通常是 os.Stdin）适配回
+// pump 所期望的契约：无输入超时时返回 (0, nil) 而非 (0, io.EOF)。
+//
+// 背景（这是「go run 直接退出」的真凶）：Go 的 os.File 默认 ZeroReadIsEOF=true，会把
+// 底层 read(2) 返回 0 字节（在 raw tty 即「本次超时、暂无输入」）当成 io.EOF 上报。pump
+// 据此判 readEnd → close(keys) → 整个 REPL 在第一次 100ms 超时后立刻退出。
+//
+// 对真实交互 raw tty 而言，read 返回 0 字节永远只意味着「超时」，绝不意味着流结束——
+// 流真正结束（终端 / pty 关闭）会以非 EOF 错误（如 EIO）上报。因此这里只把 io.EOF 改写成
+// 「超时」(0,nil)，其余错误一律透传，让 pump 仍能在终端关闭时正常收尾退出。
+func PollingTTYReader(r io.Reader) io.Reader { return pollingTTYReader{r} }
+
+type pollingTTYReader struct{ r io.Reader }
+
+func (p pollingTTYReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n == 0 && err == io.EOF {
+		return 0, nil // raw tty 读超时：不是真 EOF（见 PollingTTYReader 注释）
+	}
+	return n, err
 }
 
 // stty 执行一次 stty，作用于 os.Stdin 指向的终端，返回其标准输出。

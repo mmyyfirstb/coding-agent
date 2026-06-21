@@ -61,7 +61,9 @@ func main() {
 
 	var ui agent.UI
 	if raw {
-		ui = agent.NewRawTerminalUI(os.Stdin, os.Stdout)
+		// 把 os.Stdin 适配回 raw tty 应有的「超时=(0,nil)」语义：否则 Go 的 os.File 会把
+		// VMIN=0/VTIME 的读超时当 io.EOF，让输入 pump 在第一次空闲超时就误判流结束并退出。
+		ui = agent.NewRawTerminalUI(agent.PollingTTYReader(os.Stdin), os.Stdout)
 	} else {
 		ui = agent.NewTerminalUI(os.Stdin, os.Stdout)
 	}
