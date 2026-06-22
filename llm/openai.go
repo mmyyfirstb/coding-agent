@@ -103,8 +103,15 @@ type openAIRequest struct {
 // openAIMessage 是 OpenAI 协议里的一条消息。
 type openAIMessage struct {
 	Role string `json:"role"`
-	// content 在「assistant 仅发起工具调用」时可能为空，故 omitempty。
-	Content string `json:"content,omitempty"`
+	// content 故意「不」用 omitempty：空串 "" 是合法的 content，但缺失字段会被
+	// 后端当成 null。某些 OpenAI 兼容后端（如 qwen 系网关）对此严格，收到没有
+	// content 的非工具消息会报 400 invalid message content type: <nil>。
+	//
+	// 这正是踩坑点：推理型模型可能把全部输出放进 reasoning、把 content 留空；
+	// 这条 content 为空的 assistant 消息一旦进历史、下一轮回传，omitempty 会把空串
+	// 整个吞掉变成缺失，于是触发上述 400。保留空串字段即可规避，对带 tool_calls 的
+	// assistant 发 "content":"" 也完全合法。
+	Content string `json:"content"`
 	// 思考 / 推理内容。不同后端字段名不一（Ollama/部分网关用 reasoning，
 	// DeepSeek-R1/vLLM 用 reasoning_content），两个都解析、取非空者。
 	// 这两个字段仅在「解析响应」时有意义；构造请求时从不赋值，omitempty
@@ -229,7 +236,7 @@ func toOpenAIMessages(msgs []Message) []openAIMessage {
 			}
 			out = append(out, openAIMessage{
 				Role:      RoleAssistant,
-				Content:   m.Content, // 可能为空，omitempty 会自动省略
+				Content:   m.Content, // 可能为空；带 tool_calls 时发 "content":"" 也合法
 				ToolCalls: calls,
 			})
 
