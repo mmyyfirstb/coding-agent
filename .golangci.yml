@@ -1,0 +1,16 @@
+# golangci-lint 配置（v2）。
+# 默认启用 errcheck / govet / ineffassign / staticcheck / unused 等。
+# 本项目是「终端 TUI + 极简 HTTP 客户端」：
+#   - 对终端写入（fmt.Fprint*）检查返回值没有意义——写失败时终端本身已不可用；
+#   - 对响应体 Close 检查返回值同理是噪声。
+# 故仅用 errcheck 白名单排除这两类，其余告警一律按默认严格执行、必须清零。
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.ReadCloser).Close

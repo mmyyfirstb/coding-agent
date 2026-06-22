@@ -228,6 +228,41 @@ func TestReadLine_WrapNoGhost(t *testing.T) {
 	}
 }
 
+// curOf 把一段输出喂给 vt，返回喂完后光标停在第几行第几列。
+func curOf(cols int, s string) (row, col int) {
+	v := &vt{cols: cols}
+	v.feed(s)
+	return v.row, v.col
+}
+
+// TestReadLine_WrapOddPromptCursor 复现「奇数宽提示符 + 中文折行」的光标错位 bug：
+// 真实提示符「你 › 」显示宽 5（奇数），其后跟宽度 2 的汉字时，某个汉字会在折行边界
+// 被整体挤到下一行、上一行末尾留 1 列空白。若重绘仍用线性 /cols 估算行列（忽略这段留白），
+// 光标列就会偏 1，落进某个汉字的第二格——肉眼看上去就是「光标 / 重打的提示符嵌进汉字中间」。
+// 这里不按回车，直接比对 ReadLine 输出留下的光标落点与「裸提示符+内容」的真实落点。
+func TestReadLine_WrapOddPromptCursor(t *testing.T) {
+	const cols = 10
+	const prompt = ">>>>>"          // 宽度 5（奇数），无内部空格便于断言
+	content := []rune("一二三四五六七八九十") // 10 个中文，宽 20
+
+	ks := make([]Key, 0, len(content))
+	for _, r := range content {
+		ks = append(ks, Key{Kind: KeyRune, Rune: r})
+	}
+
+	var out bytes.Buffer
+	if line, _ := ReadLine(feed(ks...), &out, prompt, false, cols); line != string(content) {
+		t.Fatalf("得到 %q，期望 %q", line, string(content))
+	}
+
+	// 基准：裸提示符 + 内容按终端折行后，光标本应停在内容末尾的真实落点。
+	wantRow, wantCol := curOf(cols, prompt+string(content))
+	gotRow, gotCol := curOf(cols, out.String())
+	if gotRow != wantRow || gotCol != wantCol {
+		t.Fatalf("折行后光标错位：得到 (行%d,列%d)，期望 (行%d,列%d)", gotRow, gotCol, wantRow, wantCol)
+	}
+}
+
 // TestReadLine_WrapShrinkClears 守护反向场景：内容从多行退格缩回一行时，
 // 必须把多出来的旧行清干净，屏上不能残留被删掉的尾部字符。
 func TestReadLine_WrapShrinkClears(t *testing.T) {
@@ -235,7 +270,7 @@ func TestReadLine_WrapShrinkClears(t *testing.T) {
 	const prompt = ">>"
 
 	ks := make([]Key, 0, 24)
-	for _, r := range []rune("一二三四五六七八九十") { // 先填满 3 行
+	for _, r := range "一二三四五六七八九十" { // 先填满 3 行
 		ks = append(ks, Key{Kind: KeyRune, Rune: r})
 	}
 	for i := 0; i < 7; i++ { // 退 7 个，剩 "一二三"
