@@ -17,12 +17,17 @@
 ## 常用命令
 
 ```bash
-go build ./...     # 构建
-go vet ./...       # 静态检查
-go test ./...      # 跑全部测试（含端到端集成测试）
-gofmt -l .         # 检查格式（提交前应无输出）
+make build         # = go build ./...
+make vet           # = go vet ./...
+make test          # 跑全部测试（含端到端集成测试）
+make fmt-check     # 检查格式（提交前应无输出）
+make lint          # golangci-lint（首次会按需安装固定版本到 $GOPATH/bin）
+make check         # 提交前一把梭：build + vet + fmt-check + test + lint
 go run .           # 运行（需先准备 config.json，见 README）
 ```
+
+> golangci-lint 只是**开发 / CI 工具**，不被任何源码 import，不违反「零第三方依赖」。
+> 版本固定在 `Makefile` 的 `GOLANGCI_LINT_VERSION`，升级改这一处即可。
 
 ## 架构与约定
 
@@ -34,7 +39,8 @@ go run .           # 运行（需先准备 config.json，见 README）
 - 代码风格：**纯 Go 标准库、零第三方依赖**；**重中文注释**；一个文件一个概念。
 - **加工具** = 实现 `tools.Tool` + 在 `main.go` 里 `reg.Register(...)` 一行。
 - **换后端** = 实现 `llm.Provider`，在 `main.go` 换构造函数。
-- 改动后请保证 `go build ./...`、`go vet ./...`、`go test ./...`、`gofmt -l .` 全部干净。
+- 改动后请保证 `make build`、`make vet`、`make fmt-check`、`make test` 全部干净。
+- **测试通过后必须再跑 `make lint`（golangci-lint）并清零告警**，是收尾 / 提交前的最后一关；图省事可直接 `make check` 一把梭。
 
 ## 设计文档
 

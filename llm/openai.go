@@ -82,10 +82,7 @@ func shouldSkipVerify(baseURL string, override *bool) bool {
 
 	// 3) 主机名是纯 IP → 跳过；是域名 → 不跳过。
 	host := u.Hostname()
-	if net.ParseIP(host) != nil {
-		return true
-	}
-	return false
+	return net.ParseIP(host) != nil
 }
 
 // ---------------------------------------------------------------------------
@@ -265,11 +262,8 @@ func toOpenAITools(tools []ToolSpec) []openAITool {
 	for _, t := range tools {
 		out = append(out, openAITool{
 			Type: "function",
-			Function: openAIToolFunc{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters, // 直接透传 JSON Schema
-			},
+			// openAIToolFunc 与 ToolSpec 字段一一对应，直接做结构体转换透传（含 JSON Schema）。
+			Function: openAIToolFunc(t),
 		})
 	}
 	return out
