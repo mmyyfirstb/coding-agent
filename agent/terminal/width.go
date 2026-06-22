@@ -55,13 +55,26 @@ func runeWidth(r rune) int {
 	return 1
 }
 
-// runesWidth 是 runeWidth 对一段 rune 求和。
-func runesWidth(rs []rune) int {
-	w := 0
+// wrapRowCol 模拟把 rs 逐字符摆进宽度为 cols 的终端（从第 0 行第 start 列起），
+// 返回摆放结束后光标停在第几行第几列（均 0 基，行从 0 起算）。
+// 终端折行规则：当前行放不下整个字符（col+w > cols）时，该字符整体挪到下一行行首、
+// 上一行尾部留空——全角字符不跨行折断。内容正好填满（col==cols）时不提前换行，
+// 维持「pending wrap」语义，交由调用方的边缘补行逻辑处理。
+// 这正是行编辑器定位光标的依据：线性的 (start+宽)/cols 估算会漏掉跨边界留下的空白列。
+func wrapRowCol(rs []rune, start, cols int) (row, col int) {
+	col = start
 	for _, r := range rs {
-		w += runeWidth(r)
+		w := runeWidth(r)
+		if w == 0 {
+			continue
+		}
+		if col+w > cols {
+			row++
+			col = 0
+		}
+		col += w
 	}
-	return w
+	return
 }
 
 // displayWidth 计算字符串的显示宽度，跳过 ANSI 转义序列（如 \033[36m，零宽）。

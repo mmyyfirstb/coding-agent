@@ -25,25 +25,23 @@ func ReadLine(keys <-chan Key, out io.Writer, prompt string, escCancels bool, co
 		cols = 80 // 兜底：宽度未知时按 80 列折行
 	}
 
-	// 多行重绘状态：记住上一帧占了几行、光标当时在第几列，
+	// 多行重绘状态：记住上一帧占了几行、光标当时在第几「物理行」，
 	// 这样下一帧能先回到首行、清掉所有旧行，再整段重排——
 	// 从根上修掉「内容超过一行宽度后不停刷旧行」的重影。
-	// 算法移植自 linenoise 的 refreshMultiLine，并改成「显示列宽」感知（中文占 2 列）。
-	oldRows := 1   // 上一帧内容占的物理行数（>=1）
-	oldColpos := 0 // 上一帧光标的显示列偏移（用于算它当时在第几行）
+	// 算法移植自 linenoise 的 refreshMultiLine，但行列一律用 wrapRowCol 按真实折行
+	// 模拟（中文占 2 列、放不下时整字符挪行、上一行末尾留白），不再用线性 /cols 估算——
+	// 后者会忽略「全角字符跨边界时上一行尾部留的那一列空白」，导致光标列偏 1、嵌进汉字中间。
+	oldRows := 1      // 上一帧内容占的物理行数（>=1）
+	oldCursorRow := 0 // 上一帧光标停在第几物理行（0 基）
 
 	redraw := func() {
-		blen := runesWidth(buf)          // 内容总显示宽
-		cpos := runesWidth(buf[:cursor]) // 光标前内容显示宽
-		rows := (promptW + blen + cols - 1) / cols
-		if rows < 1 {
-			rows = 1
-		}
-		rpos := (promptW + oldColpos + cols) / cols // 上一帧光标所在物理行（1 基）
+		endRow, endCol := wrapRowCol(buf, promptW, cols)          // 整段末尾光标落点
+		curRow, curCol := wrapRowCol(buf[:cursor], promptW, cols) // 目标光标落点
+		rows := endRow + 1
 
 		var b strings.Builder
-		// 1) 先下移到上一帧的最后一行。
-		if down := oldRows - rpos; down > 0 {
+		// 1) 从上一帧光标所在行下移到上一帧最后一行。
+		if down := oldRows - 1 - oldCursorRow; down > 0 {
 			fmt.Fprintf(&b, "\033[%dB", down)
 		}
 		// 2) 自下而上逐行「清行 + 上移」。
@@ -55,33 +53,31 @@ func ReadLine(keys <-chan Key, out io.Writer, prompt string, escCancels bool, co
 		// 4) 重打提示符 + 全部内容（终端会按需自动折行）。
 		b.WriteString(prompt)
 		b.WriteString(string(buf))
-		// 5) 边缘补行：光标在末尾且正好填满整行时，终端不会真正换行，
-		//    需手动 \n 把后续光标定位推到新行（否则定位会偏）。
-		if len(buf) > 0 && cursor == len(buf) && (promptW+blen)%cols == 0 {
+		// 5) 边缘补行：内容正好填满整行时，终端停在 pending-wrap（光标贴右边沿但未真正换行），
+		//    手动 \n 把光标推到真正的新行行首，后续定位才不会偏。
+		if endCol == cols {
 			b.WriteString("\n\r")
 			rows++
+			endRow++ // 光标被推到新行行首；endCol 此后不再用，无需归零
 		}
-		// 6) 上移到光标应在的行。
-		rpos2 := (promptW + cpos + cols) / cols
-		if up := rows - rpos2; up > 0 {
+		// 6) 从末尾光标行上移到目标光标行。
+		if up := endRow - curRow; up > 0 {
 			fmt.Fprintf(&b, "\033[%dA", up)
 		}
 		// 7) 定位到目标列（CSI 0 C 会被当作 1，col==0 时只回行首）。
-		if col := (promptW + cpos) % cols; col > 0 {
-			fmt.Fprintf(&b, "\r\033[%dC", col)
-		} else {
-			b.WriteString("\r")
+		b.WriteString("\r")
+		if curCol > 0 {
+			fmt.Fprintf(&b, "\033[%dC", curCol)
 		}
-		oldColpos = cpos
 		oldRows = rows
+		oldCursorRow = curRow
 		fmt.Fprint(out, b.String())
 	}
 
 	// finish 在回车 / 中断等收尾时，把光标从当前行移到整段输入的下一行，
 	// 保证已输入内容原样留在屏上、后续输出另起一行。
 	finish := func() {
-		rpos := (promptW + oldColpos + cols) / cols
-		if down := oldRows - rpos; down > 0 {
+		if down := oldRows - 1 - oldCursorRow; down > 0 {
 			fmt.Fprintf(out, "\033[%dB", down)
 		}
 		fmt.Fprint(out, "\r\n")
