@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -67,6 +68,25 @@ func (p pollingTTYReader) Read(b []byte) (int, error) {
 		return 0, nil // raw tty 读超时：不是真 EOF（见 PollingTTYReader 注释）
 	}
 	return n, err
+}
+
+// terminalWidth 通过 `stty size` 取当前终端列数（用于多行重绘正确折行）。
+// 与 EnableRaw 一样走 stty，保持「零第三方依赖」；任何异常都回退 80 列。
+func terminalWidth() int {
+	out, err := stty("size")
+	if err != nil {
+		return 80
+	}
+	// `stty size` 输出形如 "rows cols"。
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 80
+	}
+	cols, err := strconv.Atoi(fields[1])
+	if err != nil || cols <= 0 {
+		return 80
+	}
+	return cols
 }
 
 // stty 执行一次 stty，作用于 os.Stdin 指向的终端，返回其标准输出。
